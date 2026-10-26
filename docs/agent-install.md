@@ -30,11 +30,11 @@ If this prints `wikiknit 0.8.1` or later, go to step 3. Otherwise, on Linux or m
 prebuilt binary (it checks the download's SHA-256 and installs to `~/.local/bin`):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/victor-kwak/wikiknit/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/victorkwak/wikiknit/main/install.sh | sh
 ```
 
 On Windows, download the `.zip` for `x86_64-pc-windows-msvc` from
-https://github.com/victor-kwak/wikiknit/releases and put `wikiknit.exe` in a folder on `PATH`. On
+https://github.com/victorkwak/wikiknit/releases and put `wikiknit.exe` in a folder on `PATH`. On
 another platform, or if the user prefers building from source and has Rust:
 
 ```bash
@@ -168,6 +168,6 @@ For Claude Code there is a plugin with one skill, `link`: how to link the notes 
 It is optional; the snippet and the hook do the checking.
 
 ```bash
-claude plugin marketplace add victor-kwak/wikiknit
+claude plugin marketplace add victorkwak/wikiknit
 claude plugin install wikiknit@wikiknit
 ```

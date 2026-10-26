@@ -408,7 +408,7 @@ fn config_text(vault_rel: &str, settings: &[Setting]) -> String {
     let mut out = format!(
         "# wikiknit config, started by `wikiknit init` (wikiknit {}).\n\
          # Rules only you know (require_link, require_inbound, forbid_link, stale, drift):\n\
-         # https://github.com/victor-kwak/wikiknit#configure\n\
+         # https://github.com/victorkwak/wikiknit#configure\n\
          vault = {}\n",
         env!("CARGO_PKG_VERSION"),
         toml_str(vault_rel)
@@ -937,7 +937,7 @@ pub fn run(opts: &Options) -> Result<Report, Error> {
     );
     report.next.push(
         "Add the rules only you know (require_link, require_inbound, forbid_link, stale, drift): \
-         https://github.com/victor-kwak/wikiknit#configure"
+         https://github.com/victorkwak/wikiknit#configure"
             .into(),
     );
     report.next.push(

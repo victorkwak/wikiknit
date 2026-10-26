@@ -2,14 +2,14 @@
 # Install the wikiknit binary from a GitHub release: picks the archive for this machine,
 # checks its SHA-256, and copies `wikiknit` into a bin folder.
 #
-#   curl -fsSL https://raw.githubusercontent.com/victor-kwak/wikiknit/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/victorkwak/wikiknit/main/install.sh | sh
 #
 # Environment: WIKIKNIT_VERSION (a tag such as v0.8.1; default: the latest release),
 # WIKIKNIT_INSTALL_DIR (default: ~/.local/bin). Linux (x86_64, aarch64) and macOS (arm64,
 # x86_64). On Windows, download the .zip from the releases page.
 set -eu
 
-repo="victor-kwak/wikiknit"
+repo="victorkwak/wikiknit"
 dir="${WIKIKNIT_INSTALL_DIR:-$HOME/.local/bin}"
 
 fail() { echo "wikiknit install: $*" >&2; exit 1; }

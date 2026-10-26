@@ -6,7 +6,7 @@ links the vault's own rules require, notes that name another note without linkin
 fell behind the repository they describe, and resolved issues still listed as open.
 
 **Set it up:** ask your agent: "Set up wikiknit for this vault, following
-https://github.com/victor-kwak/wikiknit/blob/main/docs/agent-install.md"
+https://github.com/victorkwak/wikiknit/blob/main/docs/agent-install.md"
 
 - **check**: broken links, wrong link style, unquoted links in frontmatter, links hidden in code or
   HTML, notes with no outgoing link, orphans, links your rules require (in either direction), links
@@ -71,16 +71,16 @@ Prebuilt binaries for Linux (x86_64, aarch64; static) and macOS (arm64, x86_64),
 check, into `~/.local/bin`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/victor-kwak/wikiknit/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/victorkwak/wikiknit/main/install.sh | sh
 ```
 
 `WIKIKNIT_VERSION=v0.8.1` pins a release; `WIKIKNIT_INSTALL_DIR` picks the folder. Windows: the
-`.zip` on the [releases page](https://github.com/victor-kwak/wikiknit/releases). With Rust:
+`.zip` on the [releases page](https://github.com/victorkwak/wikiknit/releases). With Rust:
 
 ```bash
 cargo binstall wikiknit                                               # the release binary, via cargo-binstall
 cargo install --locked wikiknit                                       # build from crates.io
-cargo install --locked --git https://github.com/victor-kwak/wikiknit   # build the latest main
+cargo install --locked --git https://github.com/victorkwak/wikiknit   # build the latest main
 ```
 
 Then, from the project that holds the vault:
@@ -229,7 +229,7 @@ vault has any link error. For GitHub Actions:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: curl -fsSL https://raw.githubusercontent.com/victor-kwak/wikiknit/main/install.sh | sh
+      - run: curl -fsSL https://raw.githubusercontent.com/victorkwak/wikiknit/main/install.sh | sh
       - run: ~/.local/bin/wikiknit check          # add --config <path> if wikiknit.toml is not at the top
 ```
 
@@ -353,7 +353,7 @@ to link the notes an agent writes (by meaning, both ways, with aliases), and to 
 --changed` before committing. It adds no hooks.
 
 ```bash
-claude plugin marketplace add victor-kwak/wikiknit   # or a local checkout path
+claude plugin marketplace add victorkwak/wikiknit   # or a local checkout path
 claude plugin install wikiknit@wikiknit
 ```
 

@@ -40,4 +40,4 @@ A git pre-commit hook (installed by `wikiknit init`) runs `wikiknit check --stag
 
 - wikiknit finds `wikiknit.toml` in the current folder and its parents. From another folder or repository, name it: `wikiknit --config <path>/wikiknit.toml check ...`.
 - Before you rely on a note about a repository or a live system, run `wikiknit check <note>`: it reports `drift` and `stale` for that note.
-- No `wikiknit.toml` yet: follow https://github.com/victor-kwak/wikiknit/blob/main/docs/agent-install.md (`wikiknit init`, then `wikiknit snippet --into CLAUDE.md`).
+- No `wikiknit.toml` yet: follow https://github.com/victorkwak/wikiknit/blob/main/docs/agent-install.md (`wikiknit init`, then `wikiknit snippet --into CLAUDE.md`).
