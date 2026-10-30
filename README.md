@@ -12,8 +12,11 @@ https://github.com/victorkwak/wikiknit/blob/main/docs/agent-install.md"
   HTML, notes with no outgoing link, orphans, links your rules require (in either direction), links
   your rules forbid, stale notes, notes that drifted from their repository, aliases two notes share.
   Each finding has a fix.
+- **check --changed**: only what the uncommitted changes add, and notes they roll back to an
+  older check date or commit (an old synced copy written over newer edits).
 - **check --staged**: only what the next commit adds. Run it from a git pre-commit hook.
-- **mentions**: text that names another note (by its name or an alias) without linking it.
+- **mentions**: text that names another note (by its name or an alias) without linking it, with
+  the edit that links it.
 - **links**: the notes linked to or from a note, with the line each link is written on.
 - **catalog**: one line per note (id, type, tags, aliases, title, summary), to pick link targets.
 - **graph**: connected components with index ("hub") notes left out, so isolated clusters show up.
@@ -148,6 +151,10 @@ counts as a new note), plus notes moved with plain `mv`. The broken links a dele
 leaves in other notes are the change's problem, and are reported. Before the first commit, every finding is new. Each version is read with
 its own `wikiknit.toml` when the repository has one: a commit that adds a rule is checked by it.
 
+They also report `rollback`: a changed note whose `[[stale]]` date or `[[drift]]` commit is older
+than in the last commit. Sync tools (Obsidian Sync, Dropbox) and old editor buffers can write an old
+copy of a note over newer, committed edits; nothing else in the change looks wrong.
+
 - `--staged` reads what the commit will record (the index; `git add -N` files are not in it).
 - `--changed` reads the work tree: tracked files, and new files git does not ignore.
 
@@ -157,7 +164,8 @@ Filters (`links`, `catalog`): `--type`, `--path <prefix>`, `--where key=regex` (
 case-insensitive and matching anywhere in the value, so anchor with `^...$` for an exact value; lists
 match any element), `--tag` (frontmatter `tags` and inline `#tags`; a tag also matches its nested
 tags), `--linked-to <note>`. Repeat a flag to accept any of its values. A note can be named by its id,
-path, link target, name, alias, or folder (`Projects/x` for `Projects/x/overview`).
+path (`.md` optional), link target, name, alias, or folder (`Projects/x` for `Projects/x/overview`).
+When none matches, the error suggests the likely notes, such as one moved to another folder.
 
 `links` rows give `dir` (`out`, `in`, `both`), `depth`, the note, `via` (the note one hop closer to the
 start), `source`/`line`/`context` (where the link is written, and the text around it), and for `both`
@@ -316,6 +324,7 @@ Keys of removed features (`stemmer`, `embedding_model`, `link_section`, `min_sim
 | `duplicate-alias` | error | An alias another note also uses as its name or alias |
 | `link-in-html` | warn | `[[x]]` inside raw HTML (not rendered as a link) |
 | `file-not-utf8` | warn | A note that is not valid UTF-8 (read with replacement characters) |
+| `rollback` | warn | Only with `--changed`/`--staged`: a changed note whose `[[stale]]` date is earlier than the last commit's, or whose `[[drift]]` commit is an ancestor of the last commit's; the fix gives the `git diff` to compare |
 | `duplicate-note-id` | warn | Two files with one note id (`a.md` and `a.MD`); the exact `.md` file is the note, the other resolves as a file |
 
 `drift` runs git in the repositories that notes name, read-only and with the repository's own
@@ -335,6 +344,9 @@ programs turned off (no fsmonitor, hooks, pager, signature checks, or network).
   `ambiguous-link`.
 
 ### Mentions
+
+Each mention has a `fix`: the link that replaces its first match, in the vault's link style. Link
+it only when the text means that note.
 
 `mentions` matches each note's name (its file stem, or its folder for generic stems like
 `overview`) and its `aliases:` against the text of other notes. Matching ignores case in any

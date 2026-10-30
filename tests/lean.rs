@@ -1493,3 +1493,118 @@ fn drift_fix_quotes_the_repository_path() {
         "{fix}"
     );
 }
+
+#[test]
+fn rollback_warns_when_a_change_moves_the_check_date_or_commit_back() {
+    let (p, first) = project();
+    let pp = p.path().display().to_string();
+    let head = git(p.path(), &["rev-parse", "--short", "HEAD"]);
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    let r = repo(
+        "v",
+        "[[stale]]\nfield = \"last_verified\"\ndays = 36500\n[[drift]]\npath = \"^Projects/\"\n",
+    );
+    let d = r.path();
+    let note = |commit: &str, date: &str, body: &str| {
+        format!(
+            "---\npath: {pp}\nverified_commit: {commit}\nlast_verified: {date}\n---\n# p\n{body} [[other]]\n"
+        )
+    };
+    write(d, "v/other.md", "# other\n[[Projects/p]]\n");
+    write(
+        d,
+        "v/Projects/p.md",
+        &note(&head, "2026-10-26", "New facts."),
+    );
+    git(d, &["add", "-A"]);
+    git(d, &["commit", "-qm", "v"]);
+    let rollback = |args: &[&str]| -> Vec<Value> {
+        items(d, args)
+            .into_iter()
+            .filter(|f| f["rule"] == "rollback")
+            .collect()
+    };
+
+    // An old copy (a sync from another machine) written over the committed note.
+    write(
+        d,
+        "v/Projects/p.md",
+        &note(&first, "2026-10-18", "Old facts."),
+    );
+    let found = rollback(&["check", "--changed"]);
+    let lines: Vec<u64> = found.iter().map(|f| f["line"].as_u64().unwrap()).collect();
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(lines.contains(&3) && lines.contains(&4), "{found:?}");
+    assert!(
+        found
+            .iter()
+            .all(|f| f["severity"] == "warn" && f["note"] == "Projects/p")
+    );
+    let date = found.iter().find(|f| f["line"] == 4).unwrap();
+    assert!(
+        date["message"]
+            .as_str()
+            .unwrap()
+            .contains("2026-10-18 is older than the last commit's 2026-10-26"),
+        "{date:?}"
+    );
+    let fix = date["fix"].as_str().unwrap();
+    assert!(fix.contains("diff HEAD -M -- Projects/p.md"), "{fix}");
+    assert!(
+        fix.contains("set `last_verified` to 2026-10-26 or later"),
+        "{fix}"
+    );
+
+    // Staged: the fix diffs the index. A warning does not block the commit.
+    git(d, &["add", "-A"]);
+    let staged = rollback(&["check", "--staged"]);
+    assert_eq!(staged.len(), 2, "{staged:?}");
+    assert!(staged[0]["fix"].as_str().unwrap().contains("diff --cached"));
+    install_hook(d);
+    git(d, &["commit", "-qm", "rolled back"]);
+
+    // Moving forward, or changing only the body, is no rollback.
+    write(
+        d,
+        "v/Projects/p.md",
+        &note(&head, "2026-10-30", "Newer facts."),
+    );
+    assert_eq!(rollback(&["check", "--changed"]), Vec::<Value>::new());
+    git(d, &["commit", "-qam", "forward"]);
+    write(d, "v/Projects/p.md", &note(&head, "2026-10-30", "Edited."));
+    assert_eq!(rollback(&["check", "--changed"]), Vec::<Value>::new());
+
+    // A rename carries the comparison over.
+    git(d, &["checkout", "-q", "--", "."]);
+    git(d, &["mv", "v/Projects/p.md", "v/Projects/q.md"]);
+    write(d, "v/other.md", "# other\n[[Projects/q]]\n");
+    write(
+        d,
+        "v/Projects/q.md",
+        &note(&head, "2026-10-01", "Newer facts."),
+    );
+    git(d, &["add", "-A"]);
+    let moved = rollback(&["check", "--staged"]);
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert_eq!(moved[0]["note"], "Projects/q");
+    // The diff names both paths, so it shows the old version next to the new one.
+    let fix = moved[0]["fix"].as_str().unwrap();
+    assert!(
+        fix.contains("diff --cached -M -- Projects/p.md Projects/q.md"),
+        "{fix}"
+    );
+    // Rollback findings sort with the others, by note and line.
+    let all = items(d, &["check", "--staged"]);
+    let order: Vec<(String, u64)> = all
+        .iter()
+        .map(|f| {
+            (
+                f["note"].as_str().unwrap().to_string(),
+                f["line"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    let mut sorted = order.clone();
+    sorted.sort();
+    assert_eq!(order, sorted);
+}

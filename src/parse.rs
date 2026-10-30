@@ -171,6 +171,8 @@ pub struct Parsed {
     pub html_links: Vec<RawLink>,
     /// Byte ranges that are not prose for mention matching: raw HTML and external links.
     pub non_prose: Vec<Range<usize>>,
+    /// Byte ranges of tables: a `|` there ends a cell, so a link's display text needs `\|`.
+    pub tables: Vec<Range<usize>>,
     /// Inline `#tags` in the body (normalized), in order of appearance.
     pub tags: Vec<String>,
     /// Frontmatter keys holding `[[link]]` that YAML read as nested lists (unquoted).
@@ -445,6 +447,7 @@ fn parse_body(text: &str, body_start: usize, out: &mut Parsed) {
     // `$...$` and `$$...$$` are math in Obsidian: LaTeX like `\text{[[x]]}` is not a link.
     opts.insert(Options::ENABLE_MATH);
     let mut code_block: Option<usize> = None;
+    let mut table: Option<usize> = None;
     let mut html: Vec<Range<usize>> = Vec::new();
     for (ev, range) in Parser::new_ext(body, opts).into_offset_iter() {
         let abs = body_start + range.start..body_start + range.end;
@@ -458,6 +461,12 @@ fn parse_body(text: &str, body_start: usize, out: &mut Parsed) {
             Event::Code(_) => {
                 out.inline_code.push(abs.clone());
                 out.code.push(abs);
+            }
+            Event::Start(Tag::Table(_)) => table = Some(abs.start),
+            Event::End(TagEnd::Table) => {
+                if let Some(start) = table.take() {
+                    out.tables.push(start..abs.end);
+                }
             }
             Event::InlineMath(_) | Event::DisplayMath(_) => out.code.push(abs),
             Event::Html(_) | Event::InlineHtml(_) => html.push(abs),

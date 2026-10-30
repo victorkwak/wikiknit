@@ -911,6 +911,41 @@ pub enum Drift {
     },
 }
 
+/// `old` comes before `new` on `new`'s history in the repository at `dir`: an ancestor, not
+/// the same commit. `None` when git cannot tell (no repository, unknown commit).
+#[must_use]
+pub fn is_older(dir: &Path, old: &str, new: &str) -> Option<bool> {
+    let full = |c: &str| -> Option<String> {
+        let out = other(dir)
+            .args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{c}^{{commit}}"),
+            ])
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let (old, new) = (full(old)?, full(new)?);
+    if old == new {
+        return Some(false);
+    }
+    let status = other(dir)
+        .args(["merge-base", "--is-ancestor", &old, &new])
+        .stderr(Stdio::null())
+        .status()
+        .ok()?;
+    match status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
+}
+
 /// Commits on `dir`'s `HEAD` since `commit` (a hex commit id).
 #[must_use]
 pub fn drift(dir: &Path, commit: &str) -> Drift {

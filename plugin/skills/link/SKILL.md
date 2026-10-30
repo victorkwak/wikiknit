@@ -26,7 +26,7 @@ wikiknit check --changed       # what your uncommitted changes add; exit 1 on er
 wikiknit mentions --changed    # text you wrote that names a note without linking it
 ```
 
-Each `check` finding has a `fix` column: the replacement link, the quoted frontmatter line, the closest existing notes for a broken link, or where a required link goes (for `missing-required-inbound` the edit is in the other note). Apply the errors' fixes. For `mentions`, link the ones that are real references.
+Each `check` finding has a `fix` column: the replacement link, the quoted frontmatter line, the closest existing notes for a broken link, or where a required link goes (for `missing-required-inbound` the edit is in the other note). Apply the errors' fixes. A `rollback` warning means your copy of a note has an older check date or commit than the last commit (often an old synced copy): compare as its fix says before you commit. For `mentions`, link the ones that are real references; each has a `fix` with the link to write.
 
 Warnings, and what to do:
 

@@ -332,3 +332,101 @@ fn vault_symlink_to_a_folder_above_the_config_is_rejected() {
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("folder above the config"));
 }
+
+/// Agents name notes by their path from the repository top without `.md`
+/// (`agent_vault/Issues/open/x`), as a note id leaves it out.
+#[test]
+fn a_path_without_md_names_the_note_and_a_moved_note_is_suggested() {
+    let v = vault(
+        "vault = \"notes\"",
+        &[
+            ("notes/INDEX.md", b"# INDEX\n[[Issues/resolved/x]] [[a]]\n"),
+            ("notes/a.md", b"# a\n[[INDEX]]\n"),
+            ("notes/Issues/resolved/x.md", b"# x\n[[INDEX]]\n"),
+        ],
+    );
+    for arg in ["notes/a", "./notes/a", "notes/a.md", "a"] {
+        let out = wk(v.path()).args(["check", arg]).output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{arg}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let out = wk(v.path())
+        .args(["check", "notes/Issues/open/x"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("did you mean: Issues/resolved/x"), "{err}");
+}
+
+/// A bare note id from a vault subfolder is still the note with that id, not the file of that
+/// name in the subfolder.
+#[test]
+fn a_note_id_wins_over_a_cwd_path_without_md() {
+    let v = vault(
+        "",
+        &[
+            ("x.md", b"# x\n[[sub/x]]\n"),
+            ("sub/x.md", b"# subx\n[[x]]\n"),
+        ],
+    );
+    let ids = |args: &[&str]| -> Vec<String> {
+        let out = wk(&v.path().join("sub"))
+            .args(["--format", "json", "links"])
+            .args(args)
+            .output()
+            .unwrap();
+        let env: Value = serde_json::from_slice(&out.stdout).unwrap();
+        env["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(ids(&["x"]), ["sub/x"], "the root note x links sub/x");
+    assert_eq!(ids(&["x.md"]), ["x"], "the file sub/x.md links x");
+}
+
+/// "did you mean" ranks an id the argument ends with first, and a note moved to another folder
+/// by its name (the folder name for generic stems such as `overview`), without listing every
+/// note that shares a generic stem.
+#[test]
+fn suggestions_rank_the_likely_note_first() {
+    let mut files: Vec<(String, Vec<u8>)> = vec![("notes/INDEX.md".into(), b"# INDEX\n".to_vec())];
+    for p in [
+        "alpha", "beta", "gamma", "delta", "epsilon", "eta", "theta", "iota", "kappa",
+    ] {
+        files.push((
+            format!("notes/Projects/{p}/overview.md"),
+            format!("# {p}\n[[INDEX]]\n").into_bytes(),
+        ));
+    }
+    files.push((
+        "notes/Archive/zeta/overview.md".into(),
+        b"# zeta\n[[INDEX]]\n".to_vec(),
+    ));
+    let refs: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(p, b)| (p.as_str(), b.as_slice()))
+        .collect();
+    let v = vault("vault = \"notes\"", &refs);
+    let err = |arg: &str| {
+        let out = wk(v.path()).args(["check", arg]).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{arg}");
+        String::from_utf8_lossy(&out.stderr).trim().to_string()
+    };
+    assert!(
+        err("Projects/zeta/overview").ends_with("did you mean: Archive/zeta/overview"),
+        "{}",
+        err("Projects/zeta/overview")
+    );
+    assert_eq!(
+        err("Projects/zetaa/overview"),
+        "wikiknit: no note matches `Projects/zetaa/overview`"
+    );
+}

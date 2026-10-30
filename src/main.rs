@@ -238,6 +238,9 @@ struct Versions {
     after: Vault,
     before: Vault,
     renamed: BTreeMap<String, String>,
+    /// The vault folder on disk (for commands in fixes).
+    vault_dir: std::path::PathBuf,
+    staged: bool,
 }
 
 /// `a/./b/../c` -> `a/c`, as a path from the top with `/`; `None` if it climbs out.
@@ -360,6 +363,8 @@ fn versions(disk: &Config, change: Change, tmp: &tempfile::TempDir) -> Result<Op
         after,
         before,
         renamed,
+        vault_dir: disk.vault.clone(),
+        staged: source == Source::Staged,
     }))
 }
 
@@ -392,10 +397,10 @@ fn renamed<'a>(v: &'a Versions, id: &'a str) -> &'a str {
     v.renamed.get(id).map_or(id, String::as_str)
 }
 
-/// The findings `v.after` has and `v.before` does not.
+/// The findings `v.after` has and `v.before` does not, and the notes it rolls back.
 fn new_findings(v: &Versions) -> Vec<rules::Finding> {
     let key = |f: &rules::Finding, note: &str| (note.to_string(), f.rule, f.key.clone());
-    introduced(
+    let mut found = introduced(
         rules::check(&v.after, None),
         &rules::check(&v.before, None),
         |f| key(f, &f.note),
@@ -406,7 +411,16 @@ fn new_findings(v: &Versions) -> Vec<rules::Finding> {
                 renamed(v, &f.key).to_string(),
             )
         },
-    )
+    );
+    found.extend(rules::rollback(
+        &v.before,
+        &v.after,
+        &v.renamed,
+        &v.vault_dir,
+        v.staged,
+    ));
+    found.sort_by(|a, b| (&a.note, a.line, a.rule).cmp(&(&b.note, b.line, b.rule)));
+    found
 }
 
 /// The mentions `v.after` has and `v.before` does not.
@@ -609,7 +623,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             emit(
                 fmt,
                 "mentions",
-                &["note", "line", "term", "target", "count", "context"],
+                &["note", "line", "term", "target", "count", "context", "fix"],
                 &found,
                 |m| {
                     vec![
@@ -619,6 +633,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                         m.target.clone(),
                         m.count.to_string(),
                         m.context.clone(),
+                        m.fix.clone(),
                     ]
                 },
             );

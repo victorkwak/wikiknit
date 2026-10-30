@@ -408,15 +408,20 @@ impl Vault {
     /// Map a CLI argument (note id, vault-relative path, or file path) to a note id.
     #[must_use]
     pub fn id_for_arg(&self, arg: &str, cwd: &Path) -> Option<String> {
-        // An existing file path wins over a note id of the same spelling.
+        let trimmed = arg.trim_end_matches(".md");
+        // An existing file path wins over a note id of the same spelling. Without `.md`, a
+        // note id wins over a path that only names a note once `.md` is added: `x` run from a
+        // vault subfolder is still the note `x`.
         if let Some(rel) = self.rel_for_path(arg, cwd) {
             let id = rel.strip_suffix(".md").unwrap_or(&rel).to_string();
             return self.by_id.contains_key(&id).then_some(id);
         }
-        let trimmed = arg.trim_end_matches(".md");
-        self.by_id
-            .contains_key(trimmed)
-            .then(|| trimmed.to_string())
+        if self.by_id.contains_key(trimmed) {
+            return Some(trimmed.to_string());
+        }
+        let rel = self.rel_for_path(&format!("{arg}.md"), cwd)?;
+        let id = rel.strip_suffix(".md").unwrap_or(&rel).to_string();
+        self.by_id.contains_key(&id).then_some(id)
     }
 
     /// Find a note from a reference an agent would write: an id, a file path, a link target
@@ -465,12 +470,39 @@ impl Vault {
             return Ok(named[0]);
         }
         let candidates: Vec<&str> = if named.is_empty() {
-            self.notes
+            // Best first: an id the argument ends with (`notes/x` -> `x`), then ids containing
+            // it, then a note moved to another folder under the same name
+            // (`Issues/open/x` -> `Issues/resolved/x`; generic stems compare the folder name).
+            let name = |id: &str| -> String {
+                let mut parts = id.rsplitn(3, '/');
+                let stem = parts.next().unwrap_or(id);
+                match parts.next() {
+                    Some(folder) if generic.iter().any(|g| g.eq_ignore_ascii_case(stem)) => {
+                        format!("{folder}/{stem}")
+                    }
+                    _ => stem.to_string(),
+                }
+            };
+            let wanted_name = name(&want).to_lowercase();
+            let mut ranked: Vec<(u8, &str)> = self
+                .notes
                 .iter()
-                .filter(|n| n.id.to_lowercase().contains(&want))
-                .map(|n| n.id.as_str())
-                .take(8)
-                .collect()
+                .filter_map(|n| {
+                    let id = n.id.to_lowercase();
+                    let rank = if want.ends_with(&format!("/{id}")) {
+                        0
+                    } else if id.contains(&want) {
+                        1
+                    } else if want.contains('/') && name(&id) == wanted_name {
+                        2
+                    } else {
+                        return None;
+                    };
+                    Some((rank, n.id.as_str()))
+                })
+                .collect();
+            ranked.sort();
+            ranked.into_iter().map(|(_, id)| id).take(8).collect()
         } else {
             named.iter().map(|&i| self.notes[i].id.as_str()).collect()
         };
@@ -478,7 +510,7 @@ impl Vault {
             match (named.is_empty(), candidates.is_empty()) {
                 (true, true) => format!("no note matches `{reference}`"),
                 (true, false) => format!(
-                    "no note matches `{reference}`; ids containing it: {}",
+                    "no note matches `{reference}`; did you mean: {}",
                     candidates.join(", ")
                 ),
                 (false, _) => format!(

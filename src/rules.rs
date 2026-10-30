@@ -1,6 +1,7 @@
 //! Deterministic link rules.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -28,6 +29,7 @@ pub const RULES: &[(&str, Severity)] = &[
     ("duplicate-note-id", Severity::Warn),
     ("drift", Severity::Warn),
     ("forbidden-link", Severity::Error),
+    ("rollback", Severity::Warn),
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -807,31 +809,21 @@ fn drift(vault: &Vault, note: &Note, sink: &mut Sink<'_>) {
     let Some(rule) = vault.config.drift_rule(&note.id) else {
         return;
     };
-    let fm = &note.parsed.frontmatter;
-    // As written: YAML reads `1234567` as a number and `0e12345` as zero.
-    let Some(commit) = fm.yaml.as_ref().and_then(|r| {
-        crate::parse::Frontmatter::raw_scalar(&note.text[r.clone()], &rule.commit_field)
-    }) else {
+    let Some(commit) = commit_field(note, &rule.commit_field) else {
         return;
     };
     let commit = commit.as_str();
-    let Some(repo) = fm.str_field(&rule.repo_field).map(str::trim) else {
+    let Some(repo) = note
+        .parsed
+        .frontmatter
+        .str_field(&rule.repo_field)
+        .map(str::trim)
+    else {
         return;
     };
-    // Only a commit id goes to git ("none (not a git repo)" is a note to the reader).
-    if !(4..=64).contains(&commit.len()) || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
+    let Some(dir) = repo_dir(repo) else {
         return;
-    }
-    let dir = match repo.strip_prefix("~/") {
-        Some(rest) => match std::env::var_os("HOME") {
-            Some(home) => std::path::PathBuf::from(home).join(rest),
-            None => return,
-        },
-        None => std::path::PathBuf::from(repo),
     };
-    if !dir.is_absolute() {
-        return;
-    }
     let line = frontmatter_line(note, &rule.commit_field);
     let field = &rule.commit_field;
     // The repository as one shell word for the commands in fixes: it comes from a note.
@@ -868,6 +860,118 @@ fn drift(vault: &Vault, note: &Note, sink: &mut Sink<'_>) {
             ),
         ),
     }
+}
+
+/// A note's commit field as written, when it is a commit id. As written: YAML reads `1234567`
+/// as a number and `0e12345` as zero. Only a commit id goes to git ("none (not a git repo)" is
+/// a note to the reader).
+fn commit_field(note: &Note, field: &str) -> Option<String> {
+    let yaml = note.parsed.frontmatter.yaml.as_ref()?;
+    let commit = crate::parse::Frontmatter::raw_scalar(&note.text[yaml.clone()], field)?;
+    ((4..=64).contains(&commit.len()) && commit.chars().all(|c| c.is_ascii_hexdigit()))
+        .then_some(commit)
+}
+
+/// A repository folder written in a note (`~/` is the home directory); absolute paths only.
+fn repo_dir(repo: &str) -> Option<PathBuf> {
+    let dir = match repo.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest),
+        None => PathBuf::from(repo),
+    };
+    dir.is_absolute().then_some(dir)
+}
+
+/// `rollback`: notes that `--changed`/`--staged` would record with an older check date
+/// (`[[stale]]` field) or an older checked commit (`[[drift]]` commit field) than the last
+/// commit has. The usual cause is an old copy of the note (a sync from another machine, an
+/// editor buffer) written over newer, committed edits. `renamed` maps ids in `before` to
+/// ids in `after`; `vault_dir` is the vault on disk, for the `git diff` in the fix.
+#[must_use]
+pub fn rollback(
+    before: &Vault,
+    after: &Vault,
+    renamed: &BTreeMap<String, String>,
+    vault_dir: &Path,
+    staged: bool,
+) -> Vec<Finding> {
+    let mut sink = Sink {
+        vault: after,
+        out: Vec::new(),
+        next_key: None,
+    };
+    let cfg = &after.config;
+    let dir = shell_word(&vault_dir.to_string_lossy());
+    let diff = if staged { "diff --cached" } else { "diff HEAD" };
+    for old in &before.notes {
+        let id = renamed.get(&old.id).unwrap_or(&old.id);
+        let Some(new) = after.get(id) else { continue };
+        if new.text == old.text {
+            continue;
+        }
+        // The files as named on disk (`Up.MD`), the old path too for a rename.
+        let file = |n: &Note| {
+            let name = n.path.file_name().map_or_else(
+                || format!("{}.md", n.stem()),
+                |f| f.to_string_lossy().into_owned(),
+            );
+            let rel = match n.id.rsplit_once('/') {
+                Some((folder, _)) => format!("{folder}/{name}"),
+                None => name,
+            };
+            shell_word(&rel)
+        };
+        let paths = if old.id == new.id {
+            file(new)
+        } else {
+            format!("{} {}", file(old), file(new))
+        };
+        let compare = format!(
+            "compare with the last commit (`git -C {dir} {diff} -M -- {paths}`) and keep its facts unless they are wrong"
+        );
+        if let Some(rule) = cfg.stale_rule(&new.id) {
+            let field = &rule.field;
+            let date = |n: &Note| {
+                let v = n.parsed.frontmatter.str_field(field)?;
+                Some((parse_date(v)?, v.trim().to_string()))
+            };
+            if let (Some((was, was_text)), Some((now, now_text))) = (date(old), date(new))
+                && now < was
+            {
+                sink.key(format!("{field} older")).push_fix(
+                    "rollback",
+                    &new.id,
+                    frontmatter_line(new, field),
+                    format!(
+                        "`{field}` {now_text} is older than the last commit's {was_text}: this copy may undo committed edits"
+                    ),
+                    format!("{compare}; then set `{field}` to {was_text} or later"),
+                );
+            }
+        }
+        if let Some(rule) = cfg.drift_rule(&new.id) {
+            let field = &rule.commit_field;
+            if let (Some(was), Some(now), Some(repo)) = (
+                commit_field(old, field),
+                commit_field(new, field),
+                new.parsed
+                    .frontmatter
+                    .str_field(&rule.repo_field)
+                    .and_then(|r| repo_dir(r.trim())),
+            ) && crate::git::is_older(&repo, &now, &was) == Some(true)
+            {
+                sink.key(format!("{field} older")).push_fix(
+                    "rollback",
+                    &new.id,
+                    frontmatter_line(new, field),
+                    format!(
+                        "`{field}` {now} is older than the last commit's {was}: this copy may undo committed edits"
+                    ),
+                    format!("{compare}; then set `{field}` to {was} or later"),
+                );
+            }
+        }
+    }
+    sink.out
 }
 
 /// `forbid_link`: links the config rules out, such as a resolved issue listed as open.

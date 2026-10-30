@@ -26,6 +26,8 @@ pub struct Mention {
     pub target: String,
     pub count: usize,
     pub context: String,
+    /// The edit that links the first match, for when the text means the target note.
+    pub fix: String,
     /// Byte offset of the first match in the note text.
     #[serde(skip)]
     pub start: usize,
@@ -271,7 +273,17 @@ impl Matcher {
                         if context.chars().count() > 160 {
                             context = context.chars().take(157).collect::<String>() + "...";
                         }
+                        let in_table = p.tables.iter().any(|t| t.contains(&abs.start));
+                        let fix = link_fix(
+                            vault,
+                            target,
+                            matched,
+                            code_span.as_ref().map(|r| &note.text[r.clone()]),
+                            note.line_of(abs.start),
+                            in_table,
+                        );
                         Mention {
+                            fix,
                             note: note.id.clone(),
                             target: vault.notes[target].id.clone(),
                             term: matched.to_string(),
@@ -289,9 +301,55 @@ impl Matcher {
     }
 }
 
+/// "if it means [[target]]: on line N, write `[[target|term]]` in place of `term`".
+fn link_fix(
+    vault: &Vault,
+    target: usize,
+    term: &str,
+    code: Option<&str>,
+    line: usize,
+    in_table: bool,
+) -> String {
+    let link = crate::rules::link_text(vault, &vault.notes[target]);
+    let inner = &link[2..link.len() - 2];
+    // In a table a bare `|` ends the cell: Obsidian reads `\|` as the link's separator.
+    let bar = if in_table { "\\|" } else { "|" };
+    let new = if inner == term {
+        link.clone()
+    } else {
+        format!("[[{inner}{bar}{term}]]")
+    };
+    // A code span is replaced whole, backticks included.
+    let old = code_quote(code.unwrap_or(term));
+    format!(
+        "if it means {link}: on line {line}, write {} in place of {old}",
+        code_quote(&new)
+    )
+}
+
+/// `text` as a Markdown code span: fenced with one more backtick than its longest run, and
+/// padded with spaces when it starts or ends with a backtick.
+fn code_quote(text: &str) -> String {
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest + 1);
+    if text.starts_with('`') || text.ends_with('`') {
+        format!("{fence} {text} {fence}")
+    } else {
+        format!("{fence}{text}{fence}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_quote_fences_backticks() {
+        assert_eq!(code_quote("a"), "`a`");
+        assert_eq!(code_quote("`a`"), "`` `a` ``");
+        assert_eq!(code_quote("``a``"), "``` ``a`` ```");
+        assert_eq!(code_quote("a`b"), "``a`b``");
+    }
 
     #[test]
     fn fold_maps_offsets() {

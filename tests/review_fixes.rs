@@ -253,6 +253,11 @@ fn domain_aliases_are_found_in_inline_code() {
     // Only the code span that holds just the domain; not a command, a code block, a longer
     // domain, or an email address.
     assert_eq!(pairs, [("Reference/cogno".to_string(), 2, 1)], "{m:?}");
+    // The fix replaces the whole code span, backticks included, in the vault's link style.
+    assert_eq!(
+        m[0]["fix"],
+        "if it means [[cogno]]: on line 2, write `[[cogno|cognopraxis.com]]` in place of `` `cognopraxis.com` ``"
+    );
 }
 
 #[test]
@@ -275,4 +280,35 @@ fn links_in_math_are_not_links() {
     // Dollar amounts are not math: links between them still count.
     let l = items(v.path(), &["links", "b", "--out"]);
     assert_eq!(l.len(), 1, "{l:?}");
+}
+
+/// In a table a bare `|` ends the cell, so the mention fix escapes it; the escaped link counts
+/// as a link and the mention goes away.
+#[test]
+fn mention_fix_in_a_table_escapes_the_pipe() {
+    let v = vault(
+        "",
+        &[
+            (
+                "Reference/vp.md",
+                "---\naliases: [Acme Corp]\n---\n# vp\n[[a]]\n",
+            ),
+            ("a.md", "# a\n[[vp]]\n"),
+            (
+                "b.md",
+                "# b\n\n| Who | Site |\n|---|---|\n| x | Acme Corp |\n",
+            ),
+        ],
+    );
+    let m = items(v.path(), &["mentions", "b"]);
+    assert_eq!(
+        m[0]["fix"],
+        "if it means [[vp]]: on line 5, write `[[vp\\|Acme Corp]]` in place of `Acme Corp`"
+    );
+    fs::write(
+        v.path().join("b.md"),
+        "# b\n\n| Who | Site |\n|---|---|\n| x | [[vp\\|Acme Corp]] |\n",
+    )
+    .unwrap();
+    assert_eq!(items(v.path(), &["mentions", "b"]), Vec::<Value>::new());
 }

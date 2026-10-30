@@ -148,6 +148,20 @@ fn mentions_use_names_and_aliases() {
         })
         .collect();
     assert!(pairs.contains(&("Alpha App".into(), "Projects/alpha/overview".into())));
+    // Each mention says how to link it, in the vault's link style.
+    let alpha = found
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["term"] == "Alpha App")
+        .unwrap();
+    assert_eq!(
+        alpha["fix"],
+        format!(
+            "if it means [[Projects/alpha/overview]]: on line {}, write `[[Projects/alpha/overview|Alpha App]]` in place of `Alpha App`",
+            alpha["line"]
+        )
+    );
     // Alias-only note: matched by its alias, not by its common-word name.
     assert!(pairs.contains(&("DP-1".into(), "Systems/display".into())));
     assert!(!pairs.iter().any(|(t, _)| t == "display"));
