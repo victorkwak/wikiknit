@@ -235,7 +235,7 @@ fn domain_aliases_are_found_in_inline_code() {
             ),
             (
                 "b.md",
-                "# b\nSite: `cognopraxis.com`.\nRun `dig cognopraxis.com` first.\n\n```\ncanvas.vectorpoint.io\n```\nAlso www.cognopraxis.com.au and sub.canvas.vectorpoint.io here.\n",
+                "# b\nSite: `cognopraxis.com`.\nRun `dig cognopraxis.com` first.\n\n```\ncanvas.vectorpoint.io\n```\nAlso www.cognopraxis.com.au and sub.canvas.vectorpoint.io here.\nMail victor@cognopraxis.com.\n",
             ),
         ],
     );
@@ -250,8 +250,8 @@ fn domain_aliases_are_found_in_inline_code() {
             )
         })
         .collect();
-    // Only the code span that holds just the domain; not a command, a code block, or a
-    // longer domain.
+    // Only the code span that holds just the domain; not a command, a code block, a longer
+    // domain, or an email address.
     assert_eq!(pairs, [("Reference/cogno".to_string(), 2, 1)], "{m:?}");
 }
 

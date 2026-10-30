@@ -245,10 +245,10 @@ impl Matcher {
             {
                 continue;
             }
-            // `vectorpoint.io` inside `canvas.vectorpoint.io` or `vectorpoint.io.example`
-            // is part of another name.
+            // `vectorpoint.io` inside `canvas.vectorpoint.io`, `vectorpoint.io.example` or
+            // `me@vectorpoint.io` is part of another name.
             if terms.pathlike[m.pattern().as_usize()]
-                && (before.is_some_and(|c| matches!(c, '.' | '-' | '/'))
+                && (before.is_some_and(|c| matches!(c, '.' | '-' | '/' | '@'))
                     || (after == Some('.')
                         && note.text[abs.end + 1..]
                             .chars()
