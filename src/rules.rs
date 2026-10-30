@@ -928,8 +928,10 @@ pub fn rollback(
         let compare = format!(
             "compare with the last commit (`git -C {dir} {diff} -M -- {paths}`) and keep its facts unless they are wrong"
         );
-        if let Some(rule) = cfg.stale_rule(&new.id) {
-            let field = &rule.field;
+        // Every `[[stale]]` date field, whatever notes its limit applies to: a check date that
+        // goes back is suspect in any note.
+        let fields: BTreeSet<&str> = cfg.stale.iter().map(|r| r.field.as_str()).collect();
+        for field in fields {
             let date = |n: &Note| {
                 let v = n.parsed.frontmatter.str_field(field)?;
                 Some((parse_date(v)?, v.trim().to_string()))

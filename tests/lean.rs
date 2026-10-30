@@ -1608,3 +1608,24 @@ fn rollback_warns_when_a_change_moves_the_check_date_or_commit_back() {
     sorted.sort();
     assert_eq!(order, sorted);
 }
+
+#[test]
+fn rollback_compares_stale_date_fields_outside_the_rules_path() {
+    let r = repo(
+        "v",
+        "[[stale]]\nfield = \"last_verified\"\ndays = 30\npath = \"^Systems/\"\n",
+    );
+    let d = r.path();
+    let note = |date: &str| format!("---\nlast_verified: {date}\n---\n# r\n[[other]]\n");
+    write(d, "v/other.md", "# other\n[[Reference/r]]\n");
+    write(d, "v/Reference/r.md", &note("2026-10-26"));
+    git(d, &["add", "-A"]);
+    git(d, &["commit", "-qm", "v"]);
+    write(d, "v/Reference/r.md", &note("\"2026-10-08\""));
+    let found: Vec<Value> = items(d, &["check", "--changed"])
+        .into_iter()
+        .filter(|f| f["rule"] == "rollback")
+        .collect();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0]["note"], "Reference/r");
+}

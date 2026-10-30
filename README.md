@@ -324,7 +324,7 @@ Keys of removed features (`stemmer`, `embedding_model`, `link_section`, `min_sim
 | `duplicate-alias` | error | An alias another note also uses as its name or alias |
 | `link-in-html` | warn | `[[x]]` inside raw HTML (not rendered as a link) |
 | `file-not-utf8` | warn | A note that is not valid UTF-8 (read with replacement characters) |
-| `rollback` | warn | Only with `--changed`/`--staged`: a changed note whose `[[stale]]` date is earlier than the last commit's, or whose `[[drift]]` commit is an ancestor of the last commit's; the fix gives the `git diff` to compare |
+| `rollback` | warn | Only with `--changed`/`--staged`: a changed note whose `[[stale]]` date field (in any note, not only the rule's `path`) is earlier than the last commit's, or whose `[[drift]]` commit is an ancestor of the last commit's; the fix gives the `git diff` to compare |
 | `duplicate-note-id` | warn | Two files with one note id (`a.md` and `a.MD`); the exact `.md` file is the note, the other resolves as a file |
 
 `drift` runs git in the repositories that notes name, read-only and with the repository's own
