@@ -301,6 +301,25 @@ fn md_suffix_link_to_an_ignored_note_is_not_ambiguous() {
     assert_eq!(f, json!([]));
 }
 
+/// RUSTSEC-2026-0414: in pulldown-cmark < 0.13.5 each `[[x|]]` doubled the parser's events for
+/// the rest of the note, so a 300-byte note hung `check` (and the pre-commit hook).
+#[test]
+fn empty_display_text_links_parse_in_linear_time() {
+    let body = format!("# a\n{}\n", "[[b|]] ".repeat(40));
+    let v = vault("", &[("a.md", body.as_bytes()), ("b.md", b"# b\n[[a]]\n")]);
+    let out = wk(v.path())
+        .args(["--format", "json", "check"])
+        .timeout(std::time::Duration::from_secs(20))
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn vault_symlink_to_a_folder_above_the_config_is_rejected() {
