@@ -98,7 +98,7 @@ repository), tell the agent where it is: add one line below the block, such as
 
 `init` writes no rules: rules are decisions about the vault, and a guessed rule blocks good
 commits. Ask the user which of these they want. Give the examples. Add only the rules they confirm,
-to `wikiknit.toml` (the README section "Configure" has every key):
+to `wikiknit.toml` ([reference.md](reference.md#configure) has every key):
 
 - **require_link**: notes of one kind must link a given note.
   "Must every session log link the project it is about?"
