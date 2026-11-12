@@ -73,7 +73,7 @@ check, into `~/.local/bin`:
 curl -fsSL https://raw.githubusercontent.com/victorkwak/wikiknit/main/install.sh | sh
 ```
 
-`WIKIKNIT_VERSION=v0.8.5` pins a release; `WIKIKNIT_INSTALL_DIR` picks the folder.
+`WIKIKNIT_VERSION=v0.9.0` pins a release; `WIKIKNIT_INSTALL_DIR` picks the folder.
 
 With Rust:
 
