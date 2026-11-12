@@ -60,6 +60,10 @@ struct RawConfig {
     #[serde(default)]
     forbid_link: Vec<RawForbidLink>,
     #[serde(default)]
+    summary: Vec<RawSummary>,
+    #[serde(default)]
+    size: Vec<RawSize>,
+    #[serde(default)]
     severity: BTreeMap<String, Severity>,
     /// Keys of features removed in 0.7 (search, suggest): read and ignored, with a note.
     #[serde(flatten)]
@@ -109,6 +113,27 @@ struct RawDrift {
     repo_field: String,
     #[serde(default = "default_commit_field")]
     commit_field: String,
+    #[serde(default = "default_ref_field")]
+    ref_field: String,
+    r#ref: Option<String>,
+    #[serde(default = "default_dir_depth")]
+    dir_depth: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSummary {
+    from: String,
+    target: String,
+    commits: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSize {
+    max_kb: u32,
+    path: Option<String>,
+    fix: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -137,6 +162,14 @@ fn default_repo_field() -> String {
 
 fn default_commit_field() -> String {
     "verified_commit".into()
+}
+
+fn default_ref_field() -> String {
+    "drift_ref".into()
+}
+
+fn default_dir_depth() -> u32 {
+    2
 }
 
 fn default_min_alias_len() -> usize {
@@ -194,6 +227,37 @@ pub struct Drift {
     pub repo_field: String,
     /// Frontmatter field with the commit the note was checked against.
     pub commit_field: String,
+    /// Frontmatter field that names the revision to compare with (`origin/main`, `test`), for
+    /// a note about a repository whose checkout sits on another branch.
+    pub ref_field: String,
+    /// The revision to compare with in every repository that has it, when the note names
+    /// none. Without it, or in a repository that does not have it: `HEAD`.
+    pub rev: Option<String>,
+    /// New folders down to this depth that the note does not name are listed in the finding
+    /// (0: no list).
+    pub dir_depth: u32,
+}
+
+/// A line in the `from` note that describes another note (the line's first link, to a note
+/// matching `target`): the `stale-summary` rule counts the commits that changed the described
+/// note after the line last changed.
+#[derive(Debug, Clone)]
+pub struct Summary {
+    /// Note id that holds the lines (an index).
+    pub from: String,
+    pub target: Regex,
+    /// Report at this many commits.
+    pub commits: u32,
+}
+
+/// A note larger than `max_bytes` is reported (`note-size`): an agent reads the whole note.
+#[derive(Debug, Clone)]
+pub struct Size {
+    pub max_bytes: u64,
+    /// Only notes whose id matches; `None` = every note.
+    pub path: Option<Regex>,
+    /// The fix to show instead of the default.
+    pub fix: Option<String>,
 }
 
 /// Links that must not be written: to notes matching `target`, from notes matching `from`,
@@ -232,6 +296,9 @@ pub struct Config {
     pub stale: Vec<Stale>,
     pub drift: Vec<Drift>,
     pub forbid_link: Vec<ForbidLink>,
+    pub summary: Vec<Summary>,
+    /// Size limits; the first whose `path` matches a note applies to it.
+    pub size: Vec<Size>,
     severity: BTreeMap<String, Severity>,
 }
 
@@ -254,6 +321,8 @@ impl Config {
             stale: Vec::new(),
             drift: Vec::new(),
             forbid_link: Vec::new(),
+            summary: Vec::new(),
+            size: Vec::new(),
             severity: BTreeMap::new(),
         }
     }
@@ -394,10 +463,49 @@ impl Config {
                     "drift.repo_field and drift.commit_field must name frontmatter fields".into(),
                 ));
             }
+            if d.ref_field.trim().is_empty() {
+                return Err(bad("drift.ref_field must name a frontmatter field".into()));
+            }
+            if let Some(r) = &d.r#ref
+                && !is_revision(r)
+            {
+                return Err(bad(format!(
+                    "drift.ref `{r}` is not a branch or ref name (such as `origin/HEAD` or `main`)"
+                )));
+            }
             drift.push(Drift {
                 path: d.path.map(|p| regex(&p, "drift.path")).transpose()?,
                 repo_field: d.repo_field,
                 commit_field: d.commit_field,
+                ref_field: d.ref_field,
+                rev: d.r#ref,
+                dir_depth: d.dir_depth,
+            });
+        }
+        let mut summary = Vec::new();
+        for s in raw.summary {
+            if s.commits == 0 {
+                return Err(bad("summary.commits must be 1 or more".into()));
+            }
+            let from = note_ref(&s.from);
+            if from.is_empty() {
+                return Err(bad("summary.from must name a note".into()));
+            }
+            summary.push(Summary {
+                from,
+                target: regex(&s.target, "summary.target")?,
+                commits: s.commits,
+            });
+        }
+        let mut size = Vec::new();
+        for s in raw.size {
+            if s.max_kb == 0 {
+                return Err(bad("size.max_kb must be 1 or more".into()));
+            }
+            size.push(Size {
+                max_bytes: u64::from(s.max_kb) * 1024,
+                path: s.path.map(|p| regex(&p, "size.path")).transpose()?,
+                fix: s.fix,
             });
         }
         let mut forbid_link = Vec::new();
@@ -437,6 +545,8 @@ impl Config {
             stale,
             drift,
             forbid_link,
+            summary,
+            size,
             severity: raw.severity,
         })
     }
@@ -488,6 +598,14 @@ impl Config {
             .find(|d| d.path.as_ref().is_none_or(|p| p.is_match(id)))
     }
 
+    /// The size limit for a note: the first `[[size]]` whose `path` matches it.
+    #[must_use]
+    pub fn size_rule(&self, id: &str) -> Option<&Size> {
+        self.size
+            .iter()
+            .find(|s| s.path.as_ref().is_none_or(|p| p.is_match(id)))
+    }
+
     /// The freshness rule for a note: the first `[[stale]]` whose `path` matches it.
     #[must_use]
     pub fn stale_rule(&self, id: &str) -> Option<&Stale> {
@@ -505,6 +623,20 @@ impl Config {
     pub fn is_hub(&self, id: &str) -> bool {
         self.hubs.iter().any(|h| h == id)
     }
+}
+
+/// A git revision that is safe to hand to git as written: a branch, tag, or ref name
+/// (`origin/main`, `v1.2`, `HEAD`), never an option, a range, or an expression.
+#[must_use]
+pub fn is_revision(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 200
+        && !s.starts_with(['-', '/', '.'])
+        && !s.ends_with(['/', '.'])
+        && !s.contains("..")
+        && !s.contains("//")
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '+'))
 }
 
 /// A note named in config as written (`./INDEX.md`) -> its id form (`INDEX`).

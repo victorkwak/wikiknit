@@ -241,6 +241,11 @@ struct Versions {
     /// The vault folder on disk (for commands in fixes).
     vault_dir: std::path::PathBuf,
     staged: bool,
+    /// The vault's repository (for the rules that read its history).
+    repo: Repo,
+    /// The vault folder in the last commit, from the repository top (with a trailing `/`, or
+    /// empty for the top).
+    head_prefix: String,
 }
 
 /// `a/./b/../c` -> `a/c`, as a path from the top with `/`; `None` if it climbs out.
@@ -365,6 +370,8 @@ fn versions(disk: &Config, change: Change, tmp: &tempfile::TempDir) -> Result<Op
         renamed,
         vault_dir: disk.vault.clone(),
         staged: source == Source::Staged,
+        repo,
+        head_prefix: before_prefix,
     }))
 }
 
@@ -397,12 +404,42 @@ fn renamed<'a>(v: &'a Versions, id: &'a str) -> &'a str {
     v.renamed.get(id).map_or(id, String::as_str)
 }
 
-/// The findings `v.after` has and `v.before` does not, and the notes it rolls back.
+/// The notes of `v.after` that the change adds or edits. Line endings do not count: the work
+/// tree is read as it is on disk, where a checkout may have written CRLF for a file that the
+/// last commit has with LF.
+fn changed_notes(v: &Versions) -> BTreeSet<String> {
+    let same = |a: &str, b: &str| {
+        a == b || a.lines().eq(b.lines()) && a.ends_with('\n') == b.ends_with('\n')
+    };
+    let was: BTreeMap<&str, &str> = v
+        .before
+        .notes
+        .iter()
+        .map(|n| (renamed(v, &n.id), n.text.as_str()))
+        .collect();
+    v.after
+        .notes
+        .iter()
+        .filter(|n| !was.get(n.id.as_str()).is_some_and(|old| same(old, &n.text)))
+        .map(|n| n.id.clone())
+        .collect()
+}
+
+/// The findings `v.after` has and `v.before` does not, the notes it rolls back, and what is
+/// behind in the notes it touches: their `drift`, and the index lines that describe them
+/// (`stale-summary`). The change did not add those, but it is the moment to see them.
 fn new_findings(v: &Versions) -> Vec<rules::Finding> {
     let key = |f: &rules::Finding, note: &str| (note.to_string(), f.rule, f.key.clone());
+    let after = rules::check_notes(&v.after, None);
+    let changed = changed_notes(v);
+    let touched: Vec<rules::Finding> = after
+        .iter()
+        .filter(|f| f.rule == "drift" && changed.contains(&f.note))
+        .cloned()
+        .collect();
     let mut found = introduced(
-        rules::check(&v.after, None),
-        &rules::check(&v.before, None),
+        after,
+        &rules::check_notes(&v.before, None),
         |f| key(f, &f.note),
         |f| {
             (
@@ -412,6 +449,24 @@ fn new_findings(v: &Versions) -> Vec<rules::Finding> {
             )
         },
     );
+    // The change did not add these: they are warnings whatever `[severity]` says, so they
+    // never block a commit.
+    let behind = touched.into_iter().chain(rules::stale_summaries(
+        &v.after,
+        &v.repo,
+        &v.head_prefix,
+        None,
+        Some(&changed),
+    ));
+    for mut f in behind {
+        if !found
+            .iter()
+            .any(|g| g.rule == f.rule && g.note == f.note && g.key == f.key)
+        {
+            f.severity = "warn";
+            found.push(f);
+        }
+    }
     found.extend(rules::rollback(
         &v.before,
         &v.after,

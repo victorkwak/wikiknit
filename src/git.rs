@@ -146,6 +146,16 @@ pub struct Repo {
     staged_tree: std::cell::OnceCell<String>,
 }
 
+/// One line of a file in the last commit (without its line ending), and the commit that last
+/// changed it.
+#[derive(Debug, Clone)]
+pub struct BlameLine {
+    pub commit: String,
+    /// Committer time of `commit`, seconds since 1970.
+    pub time: i64,
+    pub text: String,
+}
+
 /// A file in a version of the vault.
 struct Entry {
     /// Path from the repository top, as git prints it (raw bytes).
@@ -350,6 +360,91 @@ impl Repo {
             .stderr(Stdio::null())
             .status()
             .is_ok_and(|s| s.success())
+    }
+
+    /// Each line of the file at `path` (from the top) as the last commit has it, with the
+    /// commit that last changed the line and that commit's time (seconds since 1970).
+    /// `Ok(None)` when there is no commit yet or the last commit does not have the file;
+    /// `Err` with git's message when `git blame` fails for a file the commit has.
+    pub fn blame_head(&self, path: &str) -> Result<Option<Vec<BlameLine>>, String> {
+        let in_head = self.has_head()
+            && self
+                .git()
+                .args(["cat-file", "-e"])
+                .arg(format!("HEAD:{path}"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+        if !in_head {
+            return Ok(None);
+        }
+        // `--ignore-revs-file=` clears the repository's `blame.ignoreRevsFile` list, which
+        // changes who gets a line. (A list that names a missing file still makes git fail.)
+        let out = self
+            .git()
+            .args([
+                "blame",
+                "--no-textconv",
+                "--ignore-revs-file=",
+                "--line-porcelain",
+                "HEAD",
+                "--",
+            ])
+            .arg(path)
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(err
+                .lines()
+                .next()
+                .unwrap_or("no message")
+                .trim()
+                .to_string());
+        }
+        let mut lines = Vec::new();
+        let (mut commit, mut time) = (String::new(), 0i64);
+        for raw in out.stdout.split(|&b| b == b'\n') {
+            if let Some(text) = raw.strip_prefix(b"\t") {
+                // Without the `\r` of a CRLF file: the text is compared with note lines.
+                let text = text.strip_suffix(b"\r").unwrap_or(text);
+                lines.push(BlameLine {
+                    commit: commit.clone(),
+                    time,
+                    text: String::from_utf8_lossy(text).into_owned(),
+                });
+                continue;
+            }
+            let line = String::from_utf8_lossy(raw);
+            if let Some(t) = line.strip_prefix("committer-time ") {
+                time = t.trim().parse().unwrap_or(0);
+            } else if let Some((id, _)) = line.split_once(' ')
+                && id.len() >= 40
+                && id.chars().all(|c| c.is_ascii_hexdigit())
+            {
+                commit = id.to_string();
+            }
+        }
+        Ok(Some(lines))
+    }
+
+    /// Commits after `commit` (a full commit id) on `HEAD` that changed the file at `path`
+    /// (from the top).
+    #[must_use]
+    pub fn commits_since(&self, commit: &str, path: &str) -> Option<u64> {
+        let out = self
+            .git()
+            .args(["rev-list", "--count", &format!("{commit}..HEAD"), "--"])
+            .arg(path)
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
     }
 
     /// The tree a version records, if it has one (`HEAD` before the first commit has none).
@@ -903,12 +998,31 @@ pub enum Drift {
     NoRepo,
     /// The commit is not in the repository (a typo, or history was rewritten).
     UnknownCommit,
-    /// Commits on `HEAD` since the commit, and `HEAD`'s short id and date.
+    /// The revision the note names is not in the repository.
+    UnknownRev,
+    /// Commits on the compared revision since the commit.
     Since {
         commits: u64,
+        /// The revision compared with, as to write it in a command (`HEAD`, `origin/main`).
+        rev: String,
+        /// Its short commit id and date.
         head: String,
         date: String,
+        /// Folders it has that the commit did not have, down to the asked depth: the top of
+        /// each new subtree, none hidden, sorted.
+        new_dirs: Vec<String>,
     },
+}
+
+/// The revision `drift` compares a commit with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Against<'a> {
+    /// The checkout's `HEAD`.
+    Head,
+    /// A revision the note names: it must be in the repository.
+    Named(&'a str),
+    /// A revision the rule names for every repository: used where it is, else `HEAD`.
+    Preferred(&'a str),
 }
 
 /// `old` comes before `new` on `new`'s history in the repository at `dir`: an ancestor, not
@@ -946,9 +1060,11 @@ pub fn is_older(dir: &Path, old: &str, new: &str) -> Option<bool> {
     }
 }
 
-/// Commits on `dir`'s `HEAD` since `commit` (a hex commit id).
+/// Commits since `commit` (a hex commit id) on the revision `against` names in `dir`, and the
+/// folders added since, down to `dir_depth` levels (0: none). Revision names must have passed
+/// `config::is_revision`: they go to git as written.
 #[must_use]
-pub fn drift(dir: &Path, commit: &str) -> Drift {
+pub fn drift(dir: &Path, commit: &str, against: Against<'_>, dir_depth: u32) -> Drift {
     let ok = |args: &[&str]| -> Option<String> {
         let out = other(dir).args(args).stderr(Stdio::null()).output().ok()?;
         out.status
@@ -958,23 +1074,76 @@ pub fn drift(dir: &Path, commit: &str) -> Drift {
     if ok(&["rev-parse", "--git-dir"]).is_none() {
         return Drift::NoRepo;
     }
-    let Some(full) = ok(&[
-        "rev-parse",
-        "--verify",
-        "--quiet",
-        &format!("{commit}^{{commit}}"),
-    ]) else {
+    let resolve = |rev: &str| {
+        ok(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
+        ])
+    };
+    let Some(full) = resolve(commit) else {
         return Drift::UnknownCommit;
     };
-    let Some(count) = ok(&["rev-list", "--count", &format!("{full}..HEAD")]) else {
+    let (rev, tip) = match against {
+        Against::Head => ("HEAD", resolve("HEAD")),
+        Against::Named(r) => match resolve(r) {
+            Some(tip) => (r, Some(tip)),
+            None => return Drift::UnknownRev,
+        },
+        Against::Preferred(r) => match resolve(r) {
+            Some(tip) => (r, Some(tip)),
+            None => ("HEAD", resolve("HEAD")),
+        },
+    };
+    // No commit yet on `HEAD` (an unborn branch): nothing to compare with.
+    let Some(tip) = tip else {
         return Drift::UnknownCommit;
     };
-    let head = ok(&["rev-parse", "--short", "HEAD"]).unwrap_or_default();
-    let date =
-        ok(&["show", "-s", "--no-show-signature", "--format=%cs", "HEAD"]).unwrap_or_default();
+    let Some(count) = ok(&["rev-list", "--count", &format!("{full}..{tip}")]) else {
+        return Drift::UnknownCommit;
+    };
+    let commits: u64 = count.parse().unwrap_or(0);
+    let head = ok(&["rev-parse", "--short", &tip]).unwrap_or_default();
+    let date = ok(&["show", "-s", "--no-show-signature", "--format=%cs", &tip]).unwrap_or_default();
+    let new_dirs = if commits > 0 && dir_depth > 0 {
+        let dirs = |rev: &str| -> std::collections::BTreeSet<String> {
+            let out = other(dir)
+                .args(["ls-tree", "-r", "-d", "-z", "--name-only", rev])
+                .stderr(Stdio::null())
+                .output();
+            let Ok(out) = out else {
+                return std::collections::BTreeSet::new();
+            };
+            out.stdout
+                .split(|&b| b == 0)
+                .filter_map(|p| std::str::from_utf8(p).ok())
+                .filter(|p| {
+                    !p.is_empty()
+                        && p.split('/').count() <= dir_depth as usize
+                        && p.split('/').all(|s| !s.starts_with('.'))
+                })
+                .map(str::to_string)
+                .collect()
+        };
+        let was = dirs(&full);
+        let new: std::collections::BTreeSet<String> = dirs(&tip)
+            .into_iter()
+            .filter(|d| !was.contains(d))
+            .collect();
+        // The top of each new subtree: a folder inside a new folder says nothing more.
+        new.iter()
+            .filter(|d| d.rsplit_once('/').is_none_or(|(up, _)| !new.contains(up)))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
     Drift::Since {
-        commits: count.parse().unwrap_or(0),
+        commits,
+        rev: rev.to_string(),
         head,
         date,
+        new_dirs,
     }
 }

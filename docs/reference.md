@@ -120,10 +120,12 @@ has one, else adds it at the end. Run it again after an upgrade.
 
 - **check**: broken links, wrong link style, unquoted links in frontmatter, links hidden in code or
   HTML, notes with no outgoing link, orphans, links your rules require (in either direction), links
-  your rules forbid, stale notes, notes that drifted from their repository, aliases two notes share.
+  your rules forbid, stale notes, notes that drifted from their repository, index lines that fell
+  behind the note they describe, notes over a size limit, aliases two notes share.
   Each finding has a fix. Exit 1 when there is an error.
-- **check --changed**: only what the uncommitted changes add, and notes they roll back to an
-  older check date or commit (an old synced copy written over newer edits).
+- **check --changed**: only what the uncommitted changes add, notes they roll back to an
+  older check date or commit (an old synced copy written over newer edits), and what is behind
+  in the notes they touch (`drift`, `stale-summary`).
 - **check --staged**: only what the next commit adds. Run it from a git pre-commit hook.
 - **mentions**: text that names another note (by its name or an alias) without linking it, with
   the edit that links it. Takes `--changed` and `--staged` too.
@@ -164,6 +166,13 @@ its own `wikiknit.toml` when the repository has one: a commit that adds a rule i
 They also report `rollback`: a changed note whose `[[stale]]` date or `[[drift]]` commit is older
 than in the last commit. Sync tools (Obsidian Sync, Dropbox) and old editor buffers can write an old
 copy of a note over newer, committed edits; nothing else in the change looks wrong.
+
+And they report two findings the change did not add, for the notes it adds or edits, because the
+edit is the moment to see them: the note's `drift` (its repository has commits the note was not
+checked against), and `stale-summary` for an index line that describes the note and that the
+change leaves as it was. Both are warnings here whatever `[severity]` says: they are printed and
+do not block a commit. A note whose line endings alone differ from the last commit (a checkout
+that writes CRLF) is not an edited note.
 
 - `--staged` reads what the commit will record (the index; `git add -N` files are not in it).
 - `--changed` reads the work tree: tracked files, and new files git does not ignore.
@@ -306,6 +315,25 @@ fix = "run scripts/snapshot.sh"  # optional: the fix to show instead of the defa
 path = "^Projects/[^/]+/overview$"
 repo_field = "path"             # default
 commit_field = "verified_commit"  # default
+ref_field = "drift_ref"         # default: a note names the branch or ref to compare with
+                                # (`drift_ref: origin/main`), for a checkout that sits elsewhere
+ref = "origin/HEAD"             # optional: the revision to compare with in every repository
+                                # that has it; without it, or where it is missing: HEAD
+dir_depth = 2                   # default: new folders to this depth that the note does not
+                                # name are listed in the finding (0: no list)
+
+# Summaries: a line of the `from` note whose first link goes to a note matching `target`
+# describes that note. Reported when `commits` commits changed the note after the line last changed.
+[[summary]]
+from = "INDEX"
+target = "^Projects/[^/]+/overview$"
+commits = 10
+
+# Size: the first rule whose `path` matches a note applies; no `path` matches every note.
+[[size]]
+max_kb = 48
+path = "^Projects/"
+fix = "move dated history to a history note"  # optional: the fix to show instead of the default
 
 [severity]                      # per rule: "error", "warn", or "off"
 link-in-code = "warn"
@@ -330,15 +358,20 @@ Keys of removed features (`stemmer`, `embedding_model`, `link_section`, `min_sim
 | `forbidden-link` | error | A link a `[[forbid_link]]` rule rules out. `near` matches the link's line (with link targets taken out, so `[[Issues/open/x]]` does not say "open") or the heading above it |
 | `orphan` | warn | A note (not a hub, not in `orphan_exempt`) that no note links to; the fix names the notes it links, the natural places to link it from |
 | `stale` | warn | A note whose `[[stale]]` date field is older than `days`, is not a date, or (with `required`) is missing |
-| `drift` | warn | A `[[drift]]` note whose repository has commits since its commit field (with the `git log` to read), whose commit is not in the repository, or whose repository is not a git repository. A commit field that is not a commit id (`none`) is left alone |
+| `drift` | warn | A `[[drift]]` note whose repository has commits since its commit field (with the `git log` to read), whose commit is not in the repository, whose `drift_ref` is not a branch or ref of the repository, or whose repository is not a git repository. A commit field that is not a commit id (`none`) is left alone. The count is against the revision the note names (`drift_ref`), else the rule's `ref` where the repository has it, else the checkout's `HEAD`. The finding lists the folders added since (the top of each new subtree, hidden ones left out) whose name is nowhere in the note as a whole word, in any case. With `--changed`/`--staged`: also shown for each note the change adds or edits |
 | `duplicate-alias` | error | An alias another note also uses as its name or alias |
 | `link-in-html` | warn | `[[x]]` inside raw HTML (not rendered as a link) |
 | `file-not-utf8` | warn | A note that is not valid UTF-8 (read with replacement characters) |
 | `rollback` | warn | Only with `--changed`/`--staged`: a changed note whose `[[stale]]` date field (in any note, not only the rule's `path`) is earlier than the last commit's, or whose `[[drift]]` commit is an ancestor of the last commit's; the fix gives the `git diff` to compare |
 | `duplicate-note-id` | warn | Two files with one note id (`a.md` and `a.MD`); the exact `.md` file is the note, the other resolves as a file |
+| `note-size` | warn | A note larger than its `[[size]]` limit. With `--changed`/`--staged`: only when the change takes the note over the limit |
+| `stale-summary` | warn | A line of a `[[summary]]` index note that describes another note (the line's first link; the line has words of its own), when at least `commits` commits changed the described note after the line last changed. Read from the vault's git history (`git blame` of the last commit, without the repository's `blame.ignoreRevsFile` list), so only in a git repository; a line edited since the last commit is current. A line whose first link goes to a file or a missing note describes that, and is left alone. Checked when either note is selected. With `--changed`/`--staged`: only for a note the change adds or edits, when the change leaves the line as it was; the change counts as one more commit |
 
 `drift` runs git in the repositories that notes name, read-only and with the repository's own
-programs turned off (no fsmonitor, hooks, pager, signature checks, or network).
+programs turned off (no fsmonitor, hooks, pager, signature checks, or network). It does not fetch:
+a remote branch such as `origin/main` is as new as the last fetch in that repository, and the
+finding gives the commit and date it compared with. A `drift_ref` or `ref` is a plain branch, tag,
+or ref name; anything else (an option, a range) is reported or rejected and never reaches git.
 
 ### How links resolve
 
@@ -365,5 +398,7 @@ match `straße`), needs word boundaries except in scripts written without spaces
 (Chinese, Japanese, Korean, Thai), and skips frontmatter, code, math, links, URLs, and raw HTML. An
 alias that reads as a domain or path (`example.com`, no spaces) is also found as the whole text of an
 inline code span (`` `example.com` ``), where such names are often written; not inside longer code or a
-longer domain (`www.example.com.au`).
+longer domain (`www.example.com.au`). A name inside a reference to a pull request, merge
+request, or issue (`owner/repo#12`, `group/subgroup/repo#12`, `group/repo!12`) is part of that
+reference, not a mention.
 

@@ -52,7 +52,10 @@ After the agent applies the fixes, both commands print nothing.
 - **Unlinked mentions**: text that names another note (by its name or an alias) without a link.
 - **Stale notes**: a date field older than a limit you set.
 - **Drift**: a note that describes a git repository, and the commits made there since the note
-  was checked.
+  was checked, against the branch you name, with the new folders the note does not mention.
+- **Stale summaries**: a line of your index that describes a note, when the note changed many
+  times after the line did.
+- **Note size**: a note that grew past a limit you set.
 - **Other defects**: orphans, notes with no outgoing link, links hidden in code or HTML, unquoted
   links in frontmatter, aliases two notes share.
 - **Only what a change adds**: `check --changed` and `check --staged` compare with the last

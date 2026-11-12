@@ -259,6 +259,10 @@ impl Matcher {
             {
                 continue;
             }
+            // `acme/widgets#12`: a name inside a pull request or issue reference is part of it.
+            if in_issue_ref(&note.text, &abs) {
+                continue;
+            }
             if note.line_text(abs.start).starts_with("# ") {
                 continue; // the H1 title names the note itself
             }
@@ -299,6 +303,32 @@ impl Matcher {
         out.extend(hits.into_values());
         out
     }
+}
+
+/// The match sits inside a reference to a pull request, merge request, or issue on a code
+/// host: `owner/repo#12`, `group/subgroup/repo#12`, `group/repo!12`. The run of name characters
+/// around the match has that form.
+fn in_issue_ref(text: &str, at: &Range<usize>) -> bool {
+    let part = |c: char| c.is_alphanumeric() || matches!(c, '_' | '.' | '-' | '/' | '#' | '!');
+    let start = text[..at.start]
+        .char_indices()
+        .rev()
+        .take_while(|&(_, c)| part(c))
+        .last()
+        .map_or(at.start, |(i, _)| i);
+    let end = text[at.end..]
+        .char_indices()
+        .find(|&(_, c)| !part(c))
+        .map_or(text.len(), |(i, _)| at.end + i);
+    // Sentence punctuation after the number is not part of the reference.
+    let token = text[start..end].trim_end_matches(['.', '-', '!']);
+    let Some((path, number)) = token.split_once(['#', '!']) else {
+        return false;
+    };
+    !number.is_empty()
+        && number.chars().all(|c| c.is_ascii_digit())
+        && path.contains('/')
+        && path.split('/').all(|name| !name.is_empty())
 }
 
 /// "if it means [[target]]: on line N, write `[[target|term]]` in place of `term`".

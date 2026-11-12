@@ -30,6 +30,8 @@ pub const RULES: &[(&str, Severity)] = &[
     ("drift", Severity::Warn),
     ("forbidden-link", Severity::Error),
     ("rollback", Severity::Warn),
+    ("note-size", Severity::Warn),
+    ("stale-summary", Severity::Warn),
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -273,9 +275,24 @@ impl<'a> Closest<'a> {
     }
 }
 
-/// Run all rules over the selected notes (`None` = every note).
+/// Run all rules over the selected notes (`None` = every note) of a vault on disk, with the
+/// rules that read the vault's own git history (`stale-summary`).
 #[must_use]
 pub fn check(vault: &Vault, selected: Option<&BTreeSet<String>>) -> Vec<Finding> {
+    let mut out = check_notes(vault, selected);
+    if !vault.config.summary.is_empty()
+        && let Ok(repo) = crate::git::Repo::of(&vault.config.vault, false)
+    {
+        out.extend(stale_summaries(vault, &repo, &repo.prefix, selected, None));
+        out.sort_by(|a, b| (&a.note, a.line, a.rule).cmp(&(&b.note, b.line, b.rule)));
+    }
+    out
+}
+
+/// The rules that need only the notes (and, for `drift`, the repositories they name): for a
+/// copy of the vault that is not in its repository.
+#[must_use]
+pub fn check_notes(vault: &Vault, selected: Option<&BTreeSet<String>>) -> Vec<Finding> {
     let cfg = &vault.config;
     let mut sink = Sink {
         vault,
@@ -569,6 +586,24 @@ pub fn check(vault: &Vault, selected: Option<&BTreeSet<String>>) -> Vec<Finding>
             );
         }
 
+        if let Some(rule) = cfg.size_rule(&note.id)
+            && note.text.len() as u64 > rule.max_bytes
+        {
+            let limit = rule.max_bytes / 1024;
+            sink.key(format!("over {limit}")).push_fix(
+                "note-size",
+                &note.id,
+                1,
+                format!(
+                    "note is {} KB; its limit is {limit} KB (a reader loads the whole note)",
+                    (note.text.len() as u64).div_ceil(1024)
+                ),
+                rule.fix.clone().unwrap_or_else(|| {
+                    "move history and detail into notes that this one links; keep what a reader needs first".into()
+                }),
+            );
+        }
+
         drift(vault, note, &mut sink);
         forbidden_links(vault, note, &resolved, &mut sink);
 
@@ -806,6 +841,7 @@ fn sibling(vault: &Vault, editor: &Note, when: &When) -> Option<usize> {
 /// `drift`: the note names a repository and the commit it was checked against; report the
 /// commits made since, so the note is checked before anyone relies on it.
 fn drift(vault: &Vault, note: &Note, sink: &mut Sink<'_>) {
+    use crate::git::{Against, Drift};
     let Some(rule) = vault.config.drift_rule(&note.id) else {
         return;
     };
@@ -828,15 +864,42 @@ fn drift(vault: &Vault, note: &Note, sink: &mut Sink<'_>) {
     let field = &rule.commit_field;
     // The repository as one shell word for the commands in fixes: it comes from a note.
     let quoted = shell_word(&dir.to_string_lossy());
-    match crate::git::drift(&dir, commit) {
-        crate::git::Drift::NoRepo => sink.key("no repo").push_fix(
+    // The revision to compare with: the one the note names, else the rule's, else `HEAD`.
+    let ref_field = &rule.ref_field;
+    // As written, like the commit: YAML reads `drift_ref: 2026` as a number.
+    let named = note
+        .parsed
+        .frontmatter
+        .yaml
+        .as_ref()
+        .and_then(|y| crate::parse::Frontmatter::raw_scalar(&note.text[y.clone()], ref_field));
+    let named = named.as_deref().map(str::trim).filter(|r| !r.is_empty());
+    let unknown_rev = |sink: &mut Sink<'_>, rev: &str| {
+        sink.key(format!("unknown ref {rev}")).push_fix(
+            "drift",
+            &note.id,
+            frontmatter_line(note, ref_field),
+            format!("`{ref_field}` {rev} is not a branch or ref in {repo}"),
+            format!(
+                "set `{ref_field}` to a branch or ref of the repository, such as `origin/main` (`git -C {quoted} branch -a` lists them), or remove it to compare with `HEAD`"
+            ),
+        );
+    };
+    let against = match (named, &rule.rev) {
+        (Some(r), _) if !crate::config::is_revision(r) => return unknown_rev(sink, r),
+        (Some(r), _) => Against::Named(r),
+        (None, Some(r)) => Against::Preferred(r),
+        (None, None) => Against::Head,
+    };
+    match crate::git::drift(&dir, commit, against, rule.dir_depth) {
+        Drift::NoRepo => sink.key("no repo").push_fix(
             "drift",
             &note.id,
             line,
             format!("`{}` {repo} is not a git repository", rule.repo_field),
             format!("fix `{}`, or remove `{field}`", rule.repo_field),
         ),
-        crate::git::Drift::UnknownCommit => sink.key(format!("unknown {commit}")).push_fix(
+        Drift::UnknownCommit => sink.key(format!("unknown {commit}")).push_fix(
             "drift",
             &note.id,
             line,
@@ -845,21 +908,192 @@ fn drift(vault: &Vault, note: &Note, sink: &mut Sink<'_>) {
                 "check the note against {repo}, then set `{field}` to its current commit (`git -C {quoted} rev-parse --short HEAD`)"
             ),
         ),
-        crate::git::Drift::Since { commits: 0, .. } => {}
-        crate::git::Drift::Since {
+        Drift::UnknownRev => unknown_rev(sink, named.unwrap_or_default()),
+        Drift::Since { commits: 0, .. } => {}
+        Drift::Since {
             commits,
+            rev,
             head,
             date,
-        } => sink.key(format!("behind {commit}")).push_fix(
-            "drift",
-            &note.id,
-            line,
-            format!("{commits} commit(s) in {repo} since `{field}` {commit} (HEAD {head}, {date})"),
-            format!(
-                "`git -C {quoted} log --oneline {commit}..HEAD`; update what changed, then set `{field}: {head}`"
-            ),
-        ),
+            new_dirs,
+        } => {
+            // New folders whose name the note does not have anywhere: what a map lacks.
+            let text = note.text.to_lowercase();
+            let unnamed: Vec<&String> = new_dirs
+                .iter()
+                .filter(|d| !has_word(&text, &d.rsplit('/').next().unwrap_or(d).to_lowercase()))
+                .collect();
+            let mut message = format!(
+                "{commits} commit(s) in {repo} since `{field}` {commit} ({rev} {head}, {date})"
+            );
+            if !unnamed.is_empty() {
+                let shown: Vec<String> = unnamed
+                    .iter()
+                    .take(MAX_NEW_DIRS)
+                    .map(|d| format!("`{d}`"))
+                    .collect();
+                message.push_str("; new folders the note does not name: ");
+                message.push_str(&shown.join(", "));
+                if unnamed.len() > MAX_NEW_DIRS {
+                    message.push_str(&format!(" (+{} more)", unnamed.len() - MAX_NEW_DIRS));
+                }
+            }
+            sink.key(format!("behind {commit}")).push_fix(
+                "drift",
+                &note.id,
+                line,
+                message,
+                format!(
+                    "`git -C {quoted} log --oneline {commit}..{rev}`; update what changed, then set `{field}: {head}`"
+                ),
+            );
+        }
     }
+}
+
+/// `text` has `word` as a whole word: not as a part of a longer run of letters and digits
+/// (`api` is not in `capital`; it is in `the-api` and `api/`).
+fn has_word(text: &str, word: &str) -> bool {
+    if word.is_empty() {
+        return false;
+    }
+    let inner = |c: char| c.is_alphanumeric() || c == '_';
+    text.match_indices(word).any(|(i, m)| {
+        !text[..i].chars().next_back().is_some_and(inner)
+            && !text[i + m.len()..].chars().next().is_some_and(inner)
+    })
+}
+
+/// New folders named in one `drift` finding.
+const MAX_NEW_DIRS: usize = 8;
+
+/// A `[[summary]]` line needs this many letters and digits outside its links: a bare list of
+/// links describes nothing.
+const MIN_SUMMARY_TEXT: usize = 12;
+
+/// `stale-summary`: a line of an index note that describes another note (`[[summary]]`), and
+/// the commits that changed the described note after the line last changed. `repo` is the
+/// vault's repository and `head_prefix` the vault folder in its last commit (from the top,
+/// with a trailing `/`, or empty); `vault` is the vault on disk or a copy of it.
+/// `selected`: only lines whose index note or described note is selected. `changed` (for
+/// `--changed`/`--staged`): only lines the change left alone that describe a note it changed.
+#[must_use]
+pub fn stale_summaries(
+    vault: &Vault,
+    repo: &crate::git::Repo,
+    head_prefix: &str,
+    selected: Option<&BTreeSet<String>>,
+    changed: Option<&BTreeSet<String>>,
+) -> Vec<Finding> {
+    let mut sink = Sink {
+        vault,
+        out: Vec::new(),
+        next_key: None,
+    };
+    // A note's file as a path from the repository top.
+    let rel = |n: &Note| -> Option<String> {
+        let inside = n.path.strip_prefix(&vault.config.vault).ok()?;
+        Some(format!(
+            "{head_prefix}{}",
+            inside.to_string_lossy().replace('\\', "/")
+        ))
+    };
+    // (index note, line, described note): one finding, though several rules match the line.
+    let mut reported: BTreeSet<(usize, usize, usize)> = BTreeSet::new();
+    for rule in &vault.config.summary {
+        let Some(from_at) = vault.index_of(&rule.from) else {
+            continue;
+        };
+        let from = &vault.notes[from_at];
+        let blame = match rel(from).map(|p| repo.blame_head(&p)) {
+            Some(Ok(Some(lines))) => lines,
+            Some(Err(e)) => {
+                // Not silent: the rule cannot run, and `git blame` fails for the user too.
+                eprintln!(
+                    "wikiknit: stale-summary is off for {}: git blame failed ({e})",
+                    from.id
+                );
+                continue;
+            }
+            _ => continue,
+        };
+        // Line text -> the newest commit that last changed a line with that text.
+        let mut last: HashMap<&str, &crate::git::BlameLine> = HashMap::new();
+        for b in &blame {
+            let e = last.entry(b.text.as_str()).or_insert(b);
+            if b.time > e.time {
+                *e = b;
+            }
+        }
+        // The first link of each line, whatever it points to: a line that starts with a link
+        // to something else (a file, a missing note) describes that, not a later link.
+        let mut first: BTreeMap<usize, (usize, Target)> = BTreeMap::new();
+        for r in vault.resolve_links(from) {
+            let start = r.raw.span.start;
+            if start < from.parsed.body_start {
+                continue;
+            }
+            let line = from.line_of(start);
+            if first.get(&line).is_none_or(|e| start < e.0) {
+                first.insert(line, (start, r.target));
+            }
+        }
+        for (line, (start, target)) in first {
+            let Target::Note(t) = target else { continue };
+            let target = &vault.notes[t];
+            if !rule.target.is_match(&target.id) || !reported.insert((from_at, line, t)) {
+                continue;
+            }
+            if selected.is_some_and(|s| !s.contains(&from.id) && !s.contains(&target.id))
+                || changed.is_some_and(|c| !c.contains(&target.id))
+            {
+                continue;
+            }
+            let (_, text, _) = from.line_at(start);
+            let words = strip_links(text)
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .count();
+            if words < MIN_SUMMARY_TEXT {
+                continue;
+            }
+            // A line the last commit does not have is new or just edited.
+            let Some(b) = last.get(text.strip_suffix('\r').unwrap_or(text)) else {
+                continue;
+            };
+            let Some(commits) = rel(target).and_then(|p| repo.commits_since(&b.commit, &p)) else {
+                continue;
+            };
+            // The change being checked changes the described note once more.
+            let total = commits + u64::from(changed.is_some());
+            if total < u64::from(rule.commits) {
+                continue;
+            }
+            let date = format_date(b.time.div_euclid(86_400));
+            let message = if changed.is_some() {
+                format!(
+                    "this line describes [[{}]]; this change and {commits} commit(s) before it changed that note after the line last changed ({date})",
+                    target.id
+                )
+            } else {
+                format!(
+                    "this line describes [[{}]]; {commits} commit(s) changed that note after the line last changed ({date})",
+                    target.id
+                )
+            };
+            sink.key(target.id.clone()).push_fix(
+                "stale-summary",
+                &from.id,
+                line,
+                message,
+                format!(
+                    "compare the line with [[{}]] and rewrite it; keep only what stays true while the note changes",
+                    target.id
+                ),
+            );
+        }
+    }
+    sink.out
 }
 
 /// A note's commit field as written, when it is a commit id. As written: YAML reads `1234567`
@@ -1228,6 +1462,17 @@ mod tests {
         assert_eq!(shell_word("it's"), r"'it'\''s'");
         assert_eq!(shell_word("-x"), "'-x'");
         assert_eq!(shell_word("a$b"), "'a$b'");
+    }
+
+    #[test]
+    fn whole_words() {
+        assert!(has_word("the api crate", "api"));
+        assert!(has_word("`crates/api/`", "api"));
+        assert!(has_word("acme-api", "api"));
+        assert!(!has_word("the capital", "api"));
+        assert!(!has_word("apis", "api"));
+        assert!(!has_word("my_api", "api"));
+        assert!(!has_word("anything", ""));
     }
 
     #[test]

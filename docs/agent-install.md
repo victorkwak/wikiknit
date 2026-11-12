@@ -137,6 +137,25 @@ to `wikiknit.toml` ([reference.md](reference.md#configure) has every key):
   [[drift]]
   path = "^Projects/[^/]+/overview$"
   ```
+  Then ask: "Is a project's checkout sometimes parked on a feature branch?" If yes, add
+  `ref = "origin/HEAD"` to the rule (compare with the remote's default branch where the
+  repository has one), and a note about a project that lives on another branch names it in its
+  frontmatter: `drift_ref: origin/test`.
+- **summary**: lines of an index note that describe other notes and fall behind them.
+  "Does your index give a line of status for each project note?"
+  ```toml
+  [[summary]]
+  from = "INDEX"
+  target = "^Projects/[^/]+/overview$"
+  commits = 10
+  ```
+- **size**: notes that agents read whole and that grow without limit.
+  "Should a project note stay under a size, such as 48 KB?"
+  ```toml
+  [[size]]
+  max_kb = 48
+  path = "^Projects/"
+  ```
 
 Also ask about notes that need no inbound link (session logs, an inbox): `orphan_exempt =
 ["Sessions/"]`.

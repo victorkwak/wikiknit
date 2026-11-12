@@ -24,7 +24,15 @@ fn isolate(c: &mut Command, global: &Path) {
         .env("GIT_AUTHOR_EMAIL", "t@example.com")
         .env("GIT_COMMITTER_NAME", "t")
         .env("GIT_COMMITTER_EMAIL", "t@example.com");
-    for v in ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"] {
+    // Config handed to git through the environment (a commit gate's `core.hooksPath`, say)
+    // is user config too.
+    for v in [
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_WORK_TREE",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_PARAMETERS",
+    ] {
         c.env_remove(v);
     }
 }
